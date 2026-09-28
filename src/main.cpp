@@ -286,6 +286,49 @@ void RenderImGui()
     //ImGui::Text("counter = %d", counter);
     ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
     ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+    ImGui::Text("Iteration %d, path tracing %.3f ms/iter (avg)", iteration, imguiData->AvgIterationMs);
+
+    // Flipping a toggle restarts the render, so images and timings stay comparable
+    ImGui::Separator();
+    if (ImGui::Checkbox("Stream compaction", &imguiData->StreamCompaction))
+    {
+        camchanged = true;
+    }
+    if (ImGui::Checkbox("Sort by material", &imguiData->SortByMaterial))
+    {
+        camchanged = true;
+    }
+    if (ImGui::Checkbox("Anti-aliasing", &imguiData->AntiAliasing))
+    {
+        camchanged = true;
+    }
+
+    // How many paths are still bouncing after each bounce (from the last iteration)
+    ImGui::Separator();
+    if (ImGui::CollapsingHeader("Alive paths per bounce", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        for (int d = 0; d < imguiData->TracedDepth && d < MAX_STAT_DEPTH; ++d)
+        {
+            if (imguiData->AlivePaths[d] < 0)
+            {
+                ImGui::Text("bounce %2d: n/a (compaction off)", d + 1);
+            }
+            else
+            {
+                ImGui::Text("bounce %2d: %d", d + 1, imguiData->AlivePaths[d]);
+            }
+        }
+
+        // Dump the numbers as CSV-ish lines so they're easy to paste into a chart
+        if (ImGui::Button("Print stats to console"))
+        {
+            printf("iteration,%d,avg_ms,%.4f\n", iteration, imguiData->AvgIterationMs);
+            for (int d = 0; d < imguiData->TracedDepth && d < MAX_STAT_DEPTH; ++d)
+            {
+                printf("bounce,%d,alive,%d\n", d + 1, imguiData->AlivePaths[d]);
+            }
+        }
+    }
     ImGui::End();
 
 

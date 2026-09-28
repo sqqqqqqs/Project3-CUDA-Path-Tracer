@@ -6,6 +6,8 @@
 #include <thrust/execution_policy.h>
 #include <thrust/random.h>
 #include <thrust/remove.h>
+#include <thrust/partition.h>
+#include <thrust/sort.h>
 
 #include "sceneStructs.h"
 #include "scene.h"
@@ -83,6 +85,10 @@ static ShadeableIntersection* dev_intersections = NULL;
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
 
+// Timers for measuring how long one iteration takes
+static cudaEvent_t timerStart = NULL;
+static cudaEvent_t timerStop = NULL;
+
 void InitDataContainer(GuiDataContainer* imGuiData)
 {
     guiData = imGuiData;
@@ -110,6 +116,8 @@ void pathtraceInit(Scene* scene)
     cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
 
     // TODO: initialize any extra device memeory you need
+    cudaEventCreate(&timerStart);
+    cudaEventCreate(&timerStop);
 
     checkCUDAError("pathtraceInit");
 }
@@ -122,6 +130,16 @@ void pathtraceFree()
     cudaFree(dev_materials);
     cudaFree(dev_intersections);
     // TODO: clean up any extra device memory you created
+    if (timerStart != NULL)
+    {
+        cudaEventDestroy(timerStart);
+        timerStart = NULL;
+    }
+    if (timerStop != NULL)
+    {
+        cudaEventDestroy(timerStop);
+        timerStop = NULL;
+    }
 
     checkCUDAError("pathtraceFree");
 }
@@ -134,7 +152,7 @@ void pathtraceFree()
 * motion blur - jitter rays "in time"
 * lens effect - jitter ray origin positions based on a lens
 */
-__global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, PathSegment* pathSegments)
+__global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, bool antiAliasing, PathSegment* pathSegments)
 {
     int x = (blockIdx.x * blockDim.x) + threadIdx.x;
     int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -147,9 +165,21 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         segment.color = glm::vec3(1.0f, 1.0f, 1.0f);
 
         // TODO: implement antialiasing by jittering the ray
+        // Anti-aliasing: aim at a random spot inside the pixel instead of the same spot
+        // every time, so edges get averaged out over many iterations
+        float jitterX = 0.0f;
+        float jitterY = 0.0f;
+        if (antiAliasing)
+        {
+            thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
+            thrust::uniform_real_distribution<float> u01(-0.5f, 0.5f);
+            jitterX = u01(rng);
+            jitterY = u01(rng);
+        }
+
         segment.ray.direction = glm::normalize(cam.view
-            - cam.right * cam.pixelLength.x * ((float)x - (float)cam.resolution.x * 0.5f)
-            - cam.up * cam.pixelLength.y * ((float)y - (float)cam.resolution.y * 0.5f)
+            - cam.right * cam.pixelLength.x * ((float)x + jitterX - (float)cam.resolution.x * 0.5f)
+            - cam.up * cam.pixelLength.y * ((float)y + jitterY - (float)cam.resolution.y * 0.5f)
         );
 
         segment.pixelIndex = index;
@@ -174,6 +204,11 @@ __global__ void computeIntersections(
     if (path_index < num_paths)
     {
         PathSegment pathSegment = pathSegments[path_index];
+        // This path already finished (only happens when compaction is off)
+        if (pathSegment.remainingBounces <= 0)
+        {
+            return;
+        }
 
         float t;
         glm::vec3 intersect_point;
@@ -280,6 +315,88 @@ __global__ void shadeFakeMaterial(
     }
 }
 
+// Our real shader. For each path:
+//   - missed everything  -> goes black and stops
+//   - hit a light        -> picks up the light's color and stops
+//   - hit anything else  -> bounces off it (scatterRay) and keeps going
+// A finished path has remainingBounces = 0, which is what stream compaction looks for.
+__global__ void shadeMaterial(
+    int iter,
+    int num_paths,
+    ShadeableIntersection* shadeableIntersections,
+    PathSegment* pathSegments,
+    Material* materials)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_paths)
+    {
+        return;
+    }
+
+    PathSegment path = pathSegments[idx];
+
+    // This path already finished (only happens when compaction is off)
+    if (path.remainingBounces <= 0)
+    {
+        return;
+    }
+
+    ShadeableIntersection intersection = shadeableIntersections[idx];
+    if (intersection.t <= 0.0f)
+    {
+        // Missed everything and flew out of the scene
+        path.color = BACKGROUND_COLOR;
+        path.remainingBounces = 0;
+    }
+    else
+    {
+        Material material = materials[intersection.materialId];
+        if (material.emittance > 0.0f)
+        {
+            // Hit a light, so this path is done
+            path.color *= material.color * material.emittance;
+            path.remainingBounces = 0;
+        }
+        else
+        {
+            path.remainingBounces--;
+
+            if (path.remainingBounces == 0)
+            {
+                // Ran out of bounces before finding a light
+                path.color = glm::vec3(0.0f);
+            }
+            else
+            {
+                // Seed with pixelIndex rather than idx, because sorting and
+                // compaction shuffle the paths around in the array
+                thrust::default_random_engine rng = makeSeededRandomEngine(iter, path.pixelIndex, path.remainingBounces);
+                glm::vec3 intersect = path.ray.origin + intersection.t * path.ray.direction;
+                scatterRay(path, intersect, intersection.surfaceNormal, material, rng);
+            }
+        }
+    }
+    pathSegments[idx] = path;
+}
+
+// Used by thrust::sort_by_key to line paths up by material
+struct CompareMaterialId
+{
+    __host__ __device__ bool operator()(const ShadeableIntersection& a, const ShadeableIntersection& b) const
+    {
+        return a.materialId < b.materialId;
+    }
+};
+
+// Used by thrust::partition: alive paths go to the front, finished ones to the back
+struct IsPathAlive
+{
+    __host__ __device__ bool operator()(const PathSegment& p) const
+    {
+        return p.remainingBounces > 0;
+    }
+};
+
 // Add the current iteration's output to the overall image
 __global__ void finalGather(int nPaths, glm::vec3* image, PathSegment* iterationPaths)
 {
@@ -342,7 +459,21 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
     // TODO: perform one iteration of path tracing
 
-    generateRayFromCamera<<<blocksPerGrid2d, blockSize2d>>>(cam, iter, traceDepth, dev_paths);
+    // Read the toggles from the GUI (use the defaults if there's no GUI)
+    bool streamCompaction = true;
+    bool sortByMaterial = false;
+    bool antiAliasing = true;
+    if (guiData != NULL)
+    {
+        streamCompaction = guiData->StreamCompaction;
+        sortByMaterial = guiData->SortByMaterial;
+        antiAliasing = guiData->AntiAliasing;
+    }
+
+    // Time the whole iteration, from camera rays to final gather
+    cudaEventRecord(timerStart);
+
+    generateRayFromCamera<<<blocksPerGrid2d, blockSize2d>>>(cam, iter, traceDepth, antiAliasing, dev_paths);
     checkCUDAError("generate camera ray");
 
     int depth = 0;
@@ -381,24 +512,74 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         // TODO: compare between directly shading the path segments and shading
         // path segments that have been reshuffled to be contiguous in memory.
 
-        shadeFakeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
+        // Sort by material so paths that hit the same material sit next to each other
+        if (sortByMaterial)
+        {
+            thrust::sort_by_key(thrust::device, dev_intersections, dev_intersections + num_paths,
+                dev_paths, CompareMaterialId());
+        }
+
+        shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
             iter,
             num_paths,
             dev_intersections,
             dev_paths,
             dev_materials
         );
-        iterationComplete = true; // TODO: should be based off stream compaction results.
+        checkCUDAError("shade one bounce");
+
+        // --- Stream Compaction ---
+        // Move finished paths to the back and keep working only on the alive ones
+        // at the front. Finished paths still hold their final color for finalGather.
+        // TODO: should be based off stream compaction results.
+        if (streamCompaction)
+        {
+            dev_path_end = thrust::partition(thrust::device, dev_paths, dev_path_end, IsPathAlive());
+            num_paths = dev_path_end - dev_paths;
+            iterationComplete = (num_paths == 0) || (depth >= traceDepth);
+        }
+        else
+        {
+            // Without compaction every path stays in the array, so just run to max depth
+            iterationComplete = (depth >= traceDepth);
+        }
 
         if (guiData != NULL)
         {
             guiData->TracedDepth = depth;
+            // Record how many paths are still alive after this bounce. With compaction
+            // we get this for free; without it we store -1, since counting them here
+            // would add extra work and throw off the timing.
+            if (depth <= MAX_STAT_DEPTH)
+            {
+                if (streamCompaction)
+                {
+                    guiData->AlivePaths[depth - 1] = num_paths;
+                }
+                else
+                {
+                    guiData->AlivePaths[depth - 1] = -1;
+                }
+            }
         }
     }
 
     // Assemble this iteration and apply it to the image
     dim3 numBlocksPixels = (pixelcount + blockSize1d - 1) / blockSize1d;
-    finalGather<<<numBlocksPixels, blockSize1d>>>(num_paths, dev_image, dev_paths);
+    // Gather all pixelcount paths, not just num_paths: compaction moved the
+    // finished ones to the back of the array, but they still hold their colors
+    finalGather<<<numBlocksPixels, blockSize1d>>>(pixelcount, dev_image, dev_paths);
+
+    cudaEventRecord(timerStop);
+    cudaEventSynchronize(timerStop);
+    float iterationMs = 0.0f;
+    cudaEventElapsedTime(&iterationMs, timerStart, timerStop);
+    if (guiData != NULL)
+    {
+        // Running average of the iteration time since the last restart
+        float totalMs = guiData->AvgIterationMs * (iter - 1) + iterationMs;
+        guiData->AvgIterationMs = totalMs / iter;
+    }
 
     ///////////////////////////////////////////////////////////////////////////
 

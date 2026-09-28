@@ -54,4 +54,26 @@ __host__ __device__ void scatterRay(
     // TODO: implement this.
     // A basic implementation of pure-diffuse shading will just call the
     // calculateRandomDirectionInHemisphere defined above.
+
+    // Nudge the new origin off the surface so the ray doesn't hit the same spot again
+    const float rayOffset = 0.001f;
+    glm::vec3 newDirection;
+
+    if (m.hasReflective > 0.0f)
+    {
+        // Mirror: bounce straight off the surface, tinted by the specular color
+        newDirection = glm::reflect(pathSegment.ray.direction, normal);
+        pathSegment.color *= m.specular.color;
+    }
+    else
+    {
+        // Diffuse: pick a random direction, more likely near the normal.
+        // With this cosine-weighted sampling, the cosine term and the pdf cancel out,
+        // so all that's left is multiplying by the base color.
+        newDirection = calculateRandomDirectionInHemisphere(normal, rng);
+        pathSegment.color *= m.color;
+    }
+
+    pathSegment.ray.origin = intersect + normal * rayOffset;
+    pathSegment.ray.direction = glm::normalize(newDirection);
 }
