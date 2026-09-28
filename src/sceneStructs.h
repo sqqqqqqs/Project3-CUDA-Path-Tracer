@@ -57,6 +57,8 @@ struct Camera
     glm::vec3 right;
     glm::vec2 fov;
     glm::vec2 pixelLength;
+    float lensRadius;       // 0 = pinhole camera, no depth of field
+    float focalDistance;    // distance to the plane that stays sharp
 };
 
 struct RenderState
@@ -84,4 +86,5 @@ struct ShadeableIntersection
   float t;
   glm::vec3 surfaceNormal;
   int materialId;
+  bool outside;   // false if the ray hit the surface from the inside (needed for refraction)
 };

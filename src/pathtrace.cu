@@ -19,6 +19,9 @@
 
 #define ERRORCHECK 1
 
+// Russian roulette starts at this bounce
+#define RR_START_DEPTH 3
+
 #define FILENAME (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 #define checkCUDAError(msg) checkCUDAErrorFn(msg, FILENAME, __LINE__)
 void checkCUDAErrorFn(const char* msg, const char* file, int line)
@@ -164,6 +167,9 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, bool
         segment.ray.origin = cam.position;
         segment.color = glm::vec3(1.0f, 1.0f, 1.0f);
 
+        thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
+        thrust::uniform_real_distribution<float> u01(0, 1);
+
         // TODO: implement antialiasing by jittering the ray
         // Anti-aliasing: aim at a random spot inside the pixel instead of the same spot
         // every time, so edges get averaged out over many iterations
@@ -171,16 +177,32 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, bool
         float jitterY = 0.0f;
         if (antiAliasing)
         {
-            thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
-            thrust::uniform_real_distribution<float> u01(-0.5f, 0.5f);
-            jitterX = u01(rng);
-            jitterY = u01(rng);
+            jitterX = u01(rng) - 0.5f;
+            jitterY = u01(rng) - 0.5f;
         }
 
         segment.ray.direction = glm::normalize(cam.view
             - cam.right * cam.pixelLength.x * ((float)x + jitterX - (float)cam.resolution.x * 0.5f)
             - cam.up * cam.pixelLength.y * ((float)y + jitterY - (float)cam.resolution.y * 0.5f)
         );
+
+        // Depth of field (thin lens): shoot from a random point on the lens
+        // toward where the original ray hits the focal plane
+        if (cam.lensRadius > 0.0f)
+        {
+            // Focal distance is measured along the view direction
+            float tFocus = cam.focalDistance / glm::dot(segment.ray.direction, cam.view);
+            glm::vec3 focusPoint = cam.position + segment.ray.direction * tFocus;
+
+            // Uniform point on the lens disk
+            float r = cam.lensRadius * sqrtf(u01(rng));
+            float angle = TWO_PI * u01(rng);
+            glm::vec3 lensOffset = r * cosf(angle) * glm::normalize(cam.right)
+                                 + r * sinf(angle) * glm::normalize(cam.up);
+
+            segment.ray.origin = cam.position + lensOffset;
+            segment.ray.direction = glm::normalize(focusPoint - segment.ray.origin);
+        }
 
         segment.pixelIndex = index;
         segment.remainingBounces = traceDepth;
@@ -216,6 +238,7 @@ __global__ void computeIntersections(
         float t_min = FLT_MAX;
         int hit_geom_index = -1;
         bool outside = true;
+        bool hit_outside = true;    // outside flag of the closest hit
 
         glm::vec3 tmp_intersect;
         glm::vec3 tmp_normal;
@@ -244,6 +267,7 @@ __global__ void computeIntersections(
                 hit_geom_index = i;
                 intersect_point = tmp_intersect;
                 normal = tmp_normal;
+                hit_outside = outside;
             }
         }
 
@@ -257,6 +281,7 @@ __global__ void computeIntersections(
             intersections[path_index].t = t_min;
             intersections[path_index].materialId = geoms[hit_geom_index].materialid;
             intersections[path_index].surfaceNormal = normal;
+            intersections[path_index].outside = hit_outside;
         }
     }
 }
@@ -322,10 +347,12 @@ __global__ void shadeFakeMaterial(
 // A finished path has remainingBounces = 0, which is what stream compaction looks for.
 __global__ void shadeMaterial(
     int iter,
+    int depth,
     int num_paths,
     ShadeableIntersection* shadeableIntersections,
     PathSegment* pathSegments,
-    Material* materials)
+    Material* materials,
+    bool russianRoulette)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_paths)
@@ -372,7 +399,26 @@ __global__ void shadeMaterial(
                 // compaction shuffle the paths around in the array
                 thrust::default_random_engine rng = makeSeededRandomEngine(iter, path.pixelIndex, path.remainingBounces);
                 glm::vec3 intersect = path.ray.origin + intersection.t * path.ray.direction;
-                scatterRay(path, intersect, intersection.surfaceNormal, material, rng);
+                scatterRay(path, intersect, intersection.surfaceNormal, intersection.outside, material, rng);
+
+                // Russian roulette: randomly kill dim paths, boost survivors
+                // by 1 / p so the result stays unbiased
+                if (russianRoulette && depth >= RR_START_DEPTH)
+                {
+                    float brightest = glm::max(path.color.r, glm::max(path.color.g, path.color.b));
+                    float surviveChance = glm::min(brightest, 1.0f);
+
+                    thrust::uniform_real_distribution<float> u01(0, 1);
+                    if (u01(rng) >= surviveChance)
+                    {
+                        path.color = glm::vec3(0.0f);
+                        path.remainingBounces = 0;
+                    }
+                    else
+                    {
+                        path.color /= surviveChance;
+                    }
+                }
             }
         }
     }
@@ -463,11 +509,13 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     bool streamCompaction = true;
     bool sortByMaterial = false;
     bool antiAliasing = true;
+    bool russianRoulette = true;
     if (guiData != NULL)
     {
         streamCompaction = guiData->StreamCompaction;
         sortByMaterial = guiData->SortByMaterial;
         antiAliasing = guiData->AntiAliasing;
+        russianRoulette = guiData->RussianRoulette;
     }
 
     // Time the whole iteration, from camera rays to final gather
@@ -521,10 +569,12 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
         shadeMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
             iter,
+            depth,
             num_paths,
             dev_intersections,
             dev_paths,
-            dev_materials
+            dev_materials,
+            russianRoulette
         );
         checkCUDAError("shade one bounce");
 

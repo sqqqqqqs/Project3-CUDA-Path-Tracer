@@ -302,6 +302,22 @@ void RenderImGui()
     {
         camchanged = true;
     }
+    if (ImGui::Checkbox("Russian roulette", &imguiData->RussianRoulette))
+    {
+        camchanged = true;
+    }
+
+    // Depth of field: lens radius 0 means a pinhole camera (everything sharp)
+    ImGui::Separator();
+    Camera& cam = renderState->camera;
+    if (ImGui::SliderFloat("Lens radius", &cam.lensRadius, 0.0f, 1.0f))
+    {
+        camchanged = true;
+    }
+    if (ImGui::SliderFloat("Focal distance", &cam.focalDistance, 0.1f, 30.0f))
+    {
+        camchanged = true;
+    }
 
     // How many paths are still bouncing after each bounce (from the last iteration)
     ImGui::Separator();

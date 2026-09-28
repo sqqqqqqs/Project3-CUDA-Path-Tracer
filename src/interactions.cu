@@ -48,6 +48,7 @@ __host__ __device__ void scatterRay(
     PathSegment & pathSegment,
     glm::vec3 intersect,
     glm::vec3 normal,
+    bool outside,
     const Material &m,
     thrust::default_random_engine &rng)
 {
@@ -58,6 +59,48 @@ __host__ __device__ void scatterRay(
     // Nudge the new origin off the surface so the ray doesn't hit the same spot again
     const float rayOffset = 0.001f;
     glm::vec3 newDirection;
+
+    if (m.hasRefractive > 0.0f)
+    {
+        // Glass: some light reflects, the rest bends through.
+        // Note: the normal always faces the incoming ray.
+        thrust::uniform_real_distribution<float> u01(0, 1);
+        glm::vec3 incoming = pathSegment.ray.direction;
+
+        // IOR ratio: air -> glass going in, glass -> air coming out
+        float eta = outside ? (1.0f / m.indexOfRefraction) : m.indexOfRefraction;
+
+        float cosIn = glm::clamp(glm::dot(-incoming, normal), 0.0f, 1.0f);
+        float sinOutSquared = eta * eta * (1.0f - cosIn * cosIn);
+        bool totalInternalReflection = sinOutSquared > 1.0f;
+
+        // Schlick: how much light reflects (use the angle on the air side)
+        float r0 = (1.0f - m.indexOfRefraction) / (1.0f + m.indexOfRefraction);
+        r0 = r0 * r0;
+        float cosForFresnel = cosIn;
+        if (!outside && !totalInternalReflection)
+        {
+            cosForFresnel = sqrtf(1.0f - sinOutSquared);
+        }
+        float reflectChance = r0 + (1.0f - r0) * powf(1.0f - cosForFresnel, 5.0f);
+
+        // Randomly pick one by the Fresnel odds (no extra weighting needed)
+        glm::vec3 refracted = glm::refract(incoming, normal, eta);
+        bool cannotRefract = totalInternalReflection || glm::dot(refracted, refracted) < 1e-8f;   // refract gives 0 on TIR
+        if (cannotRefract || u01(rng) < reflectChance)
+        {
+            newDirection = glm::reflect(incoming, normal);
+            pathSegment.ray.origin = intersect + normal * rayOffset;
+        }
+        else
+        {
+            newDirection = refracted;
+            pathSegment.ray.origin = intersect - normal * rayOffset;   // start on the far side
+        }
+        pathSegment.color *= m.color;
+        pathSegment.ray.direction = glm::normalize(newDirection);
+        return;
+    }
 
     if (m.hasReflective > 0.0f)
     {

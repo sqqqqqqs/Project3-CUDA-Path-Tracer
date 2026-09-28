@@ -61,6 +61,18 @@ void Scene::loadFromJSON(const std::string& jsonName)
             newMaterial.specular.color = newMaterial.color;
             newMaterial.hasReflective = 1.0f;
         }
+        else if (p["TYPE"] == "Refractive")
+        {
+            // Glass-like: RGB tints the light going through, IOR defaults to glass
+            const auto& col = p["RGB"];
+            newMaterial.color = glm::vec3(col[0], col[1], col[2]);
+            newMaterial.hasRefractive = 1.0f;
+            newMaterial.indexOfRefraction = 1.5f;
+            if (p.contains("IOR"))
+            {
+                newMaterial.indexOfRefraction = p["IOR"];
+            }
+        }
         MatNameToID[name] = materials.size();
         materials.emplace_back(newMaterial);
     }
@@ -106,6 +118,19 @@ void Scene::loadFromJSON(const std::string& jsonName)
     camera.position = glm::vec3(pos[0], pos[1], pos[2]);
     camera.lookAt = glm::vec3(lookat[0], lookat[1], lookat[2]);
     camera.up = glm::vec3(up[0], up[1], up[2]);
+
+    // Depth of field is optional. No lens radius means a pinhole camera,
+    // and by default we focus on the look-at point.
+    camera.lensRadius = 0.0f;
+    if (cameraData.contains("LENS_RADIUS"))
+    {
+        camera.lensRadius = cameraData["LENS_RADIUS"];
+    }
+    camera.focalDistance = glm::length(camera.lookAt - camera.position);
+    if (cameraData.contains("FOCAL_DIST"))
+    {
+        camera.focalDistance = cameraData["FOCAL_DIST"];
+    }
 
     //calculate fov based on resolution
     float yscaled = tan(fovy * (PI / 180));
