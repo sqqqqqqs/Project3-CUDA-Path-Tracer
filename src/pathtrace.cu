@@ -88,6 +88,9 @@ static ShadeableIntersection* dev_intersections = NULL;
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
 
+// All mesh triangles in the scene (meshes point into this by triStart/triCount)
+static Triangle* dev_triangles = NULL;
+
 // Timers for measuring how long one iteration takes
 static cudaEvent_t timerStart = NULL;
 static cudaEvent_t timerStop = NULL;
@@ -119,6 +122,13 @@ void pathtraceInit(Scene* scene)
     cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
 
     // TODO: initialize any extra device memeory you need
+    dev_triangles = NULL;
+    if (!scene->triangles.empty())
+    {
+        cudaMalloc(&dev_triangles, scene->triangles.size() * sizeof(Triangle));
+        cudaMemcpy(dev_triangles, scene->triangles.data(), scene->triangles.size() * sizeof(Triangle), cudaMemcpyHostToDevice);
+    }
+
     cudaEventCreate(&timerStart);
     cudaEventCreate(&timerStop);
 
@@ -133,6 +143,9 @@ void pathtraceFree()
     cudaFree(dev_materials);
     cudaFree(dev_intersections);
     // TODO: clean up any extra device memory you created
+    cudaFree(dev_triangles);
+    dev_triangles = NULL;
+
     if (timerStart != NULL)
     {
         cudaEventDestroy(timerStart);
@@ -219,6 +232,8 @@ __global__ void computeIntersections(
     PathSegment* pathSegments,
     Geom* geoms,
     int geoms_size,
+    Triangle* triangles,
+    bool bboxCulling,
     ShadeableIntersection* intersections)
 {
     int path_index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -256,6 +271,10 @@ __global__ void computeIntersections(
             else if (geom.type == SPHERE)
             {
                 t = sphereIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
+            }
+            else if (geom.type == MESH)
+            {
+                t = meshIntersectionTest(geom, triangles, pathSegment.ray, tmp_intersect, tmp_normal, outside, bboxCulling);
             }
             // TODO: add more intersection tests here... triangle? metaball? CSG?
 
@@ -510,12 +529,14 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     bool sortByMaterial = false;
     bool antiAliasing = true;
     bool russianRoulette = true;
+    bool bboxCulling = true;
     if (guiData != NULL)
     {
         streamCompaction = guiData->StreamCompaction;
         sortByMaterial = guiData->SortByMaterial;
         antiAliasing = guiData->AntiAliasing;
         russianRoulette = guiData->RussianRoulette;
+        bboxCulling = guiData->BBoxCulling;
     }
 
     // Time the whole iteration, from camera rays to final gather
@@ -545,6 +566,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_paths,
             dev_geoms,
             hst_scene->geoms.size(),
+            dev_triangles,
+            bboxCulling,
             dev_intersections
         );
         checkCUDAError("trace one bounce");

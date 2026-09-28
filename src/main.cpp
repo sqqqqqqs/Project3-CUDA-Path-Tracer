@@ -306,6 +306,10 @@ void RenderImGui()
     {
         camchanged = true;
     }
+    if (ImGui::Checkbox("Mesh bounding box culling", &imguiData->BBoxCulling))
+    {
+        camchanged = true;
+    }
 
     // Depth of field: lens radius 0 means a pinhole camera (everything sharp)
     ImGui::Separator();
