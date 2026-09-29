@@ -565,26 +565,16 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     // TODO: perform one iteration of path tracing
 
     // Read the toggles from the GUI (use the defaults if there's no GUI)
-    bool streamCompaction = true;
-    bool sortByMaterial = false;
-    bool antiAliasing = true;
-    bool russianRoulette = true;
-    bool bboxCulling = true;
-    bool directLighting = true;
+    GuiDataContainer settings;
     if (guiData != NULL)
     {
-        streamCompaction = guiData->StreamCompaction;
-        sortByMaterial = guiData->SortByMaterial;
-        antiAliasing = guiData->AntiAliasing;
-        russianRoulette = guiData->RussianRoulette;
-        bboxCulling = guiData->BBoxCulling;
-        directLighting = guiData->DirectLighting;
+        settings = *guiData;
     }
 
     // Time the whole iteration, from camera rays to final gather
     cudaEventRecord(timerStart);
 
-    generateRayFromCamera<<<blocksPerGrid2d, blockSize2d>>>(cam, iter, traceDepth, antiAliasing, dev_paths);
+    generateRayFromCamera<<<blocksPerGrid2d, blockSize2d>>>(cam, iter, traceDepth, settings.AntiAliasing, dev_paths);
     checkCUDAError("generate camera ray");
 
     int depth = 0;
@@ -609,7 +599,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_geoms,
             hst_scene->geoms.size(),
             dev_triangles,
-            bboxCulling,
+            settings.BBoxCulling,
             dev_intersections
         );
         checkCUDAError("trace one bounce");
@@ -626,7 +616,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         // path segments that have been reshuffled to be contiguous in memory.
 
         // Sort by material so paths that hit the same material sit next to each other
-        if (sortByMaterial)
+        if (settings.SortByMaterial)
         {
             thrust::sort_by_key(thrust::device, dev_intersections, dev_intersections + num_paths,
                 dev_paths, CompareMaterialId());
@@ -639,8 +629,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_intersections,
             dev_paths,
             dev_materials,
-            russianRoulette,
-            directLighting,
+            settings.RussianRoulette,
+            settings.DirectLighting,
             dev_geoms,
             dev_lightIndices,
             numLights
@@ -651,7 +641,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         // Move finished paths to the back and keep working only on the alive ones
         // at the front. Finished paths still hold their final color for finalGather.
         // TODO: should be based off stream compaction results.
-        if (streamCompaction)
+        if (settings.StreamCompaction)
         {
             dev_path_end = thrust::partition(thrust::device, dev_paths, dev_path_end, IsPathAlive());
             num_paths = dev_path_end - dev_paths;
@@ -671,7 +661,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             // would add extra work and throw off the timing.
             if (depth <= MAX_STAT_DEPTH)
             {
-                if (streamCompaction)
+                if (settings.StreamCompaction)
                 {
                     guiData->AlivePaths[depth - 1] = num_paths;
                 }
