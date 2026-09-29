@@ -310,6 +310,10 @@ void RenderImGui()
     {
         camchanged = true;
     }
+    if (ImGui::Checkbox("Direct lighting (last ray)", &imguiData->DirectLighting))
+    {
+        camchanged = true;
+    }
 
     // Depth of field: lens radius 0 means a pinhole camera (everything sharp)
     ImGui::Separator();

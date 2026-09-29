@@ -120,3 +120,102 @@ __host__ __device__ void scatterRay(
     pathSegment.ray.origin = intersect + normal * rayOffset;
     pathSegment.ray.direction = glm::normalize(newDirection);
 }
+
+__host__ __device__ void sampleLightSurface(
+    const Geom& light,
+    thrust::default_random_engine& rng,
+    glm::vec3& point,
+    glm::vec3& lightNormal,
+    float& area)
+{
+    thrust::uniform_real_distribution<float> u01(0, 1);
+
+    if (light.type == SPHERE)
+    {
+        // Uniform point on the unit sphere, then move it into place
+        float z = 1.0f - 2.0f * u01(rng);
+        float r = sqrtf(glm::max(0.0f, 1.0f - z * z));
+        float phi = TWO_PI * u01(rng);
+        glm::vec3 local(r * cosf(phi), r * sinf(phi), z);
+
+        point = glm::vec3(light.transform * glm::vec4(0.5f * local, 1.0f));
+        lightNormal = glm::normalize(glm::vec3(light.invTranspose * glm::vec4(local, 0.0f)));
+        float radius = 0.5f * light.scale.x;
+        area = 4.0f * PI * radius * radius;
+        return;
+    }
+
+    // Cube: pick a face by its area, then select a point on it
+    glm::vec3 axisX = glm::vec3(light.transform * glm::vec4(1.0f, 0.0f, 0.0f, 0.0f));
+    glm::vec3 axisY = glm::vec3(light.transform * glm::vec4(0.0f, 1.0f, 0.0f, 0.0f));
+    glm::vec3 axisZ = glm::vec3(light.transform * glm::vec4(0.0f, 0.0f, 1.0f, 0.0f));
+    float areaX = glm::length(glm::cross(axisY, axisZ));   // one face facing +/-x
+    float areaY = glm::length(glm::cross(axisX, axisZ));
+    float areaZ = glm::length(glm::cross(axisX, axisY));
+    area = 2.0f * (areaX + areaY + areaZ);
+
+    float pick = u01(rng) * (areaX + areaY + areaZ);
+    int axis = 2;
+    if (pick < areaX)
+    {
+        axis = 0;
+    }
+    else if (pick < areaX + areaY)
+    {
+        axis = 1;
+    }
+    float side = (u01(rng) < 0.5f) ? -0.5f : 0.5f;
+
+    // Random spot on that face
+    glm::vec3 local(u01(rng) - 0.5f, u01(rng) - 0.5f, u01(rng) - 0.5f);
+    local[axis] = side;
+    glm::vec3 localNormal(0.0f);
+    localNormal[axis] = (side > 0.0f) ? 1.0f : -1.0f;
+
+    point = glm::vec3(light.transform * glm::vec4(local, 1.0f));
+    lightNormal = glm::normalize(glm::vec3(light.invTranspose * glm::vec4(localNormal, 0.0f)));
+}
+
+__host__ __device__ void sampleDirectLight(
+    PathSegment& pathSegment,
+    glm::vec3 intersect,
+    glm::vec3 normal,
+    const Material& m,
+    const Geom* geoms,
+    const int* lightIndices,
+    int numLights,
+    thrust::default_random_engine& rng)
+{
+    thrust::uniform_real_distribution<float> u01(0, 1);
+
+    // Pick one light, then a point on it
+    int pickedLight = glm::min((int)(u01(rng) * numLights), numLights - 1);
+    const Geom& light = geoms[lightIndices[pickedLight]];
+
+    glm::vec3 lightPoint;
+    glm::vec3 lightNormal;
+    float lightArea;
+    sampleLightSurface(light, rng, lightPoint, lightNormal, lightArea);
+
+    glm::vec3 toLight = lightPoint - intersect;
+    float distSquared = glm::dot(toLight, toLight);
+    glm::vec3 direction = toLight / sqrtf(distSquared);
+    float cosSurface = glm::dot(direction, normal);
+    float cosLight = glm::dot(-direction, lightNormal);
+
+    // Point is behind us, or on a light face pointing away: no light, path done
+    if (cosSurface <= 0.0f || cosLight <= 0.0f)
+    {
+        pathSegment.color = glm::vec3(0.0f);
+        pathSegment.remainingBounces = 0;
+        return;
+    }
+
+    // (color / pi) * cos / pdf, with pdf = dist^2 / (cosLight * area * numLights)
+    // Light is added when the ray actually hits it (blocked = black)
+    pathSegment.color *= m.color * cosSurface * cosLight * lightArea * (float)numLights / (PI * distSquared);
+
+    const float rayOffset = 0.001f;
+    pathSegment.ray.origin = intersect + normal * rayOffset;
+    pathSegment.ray.direction = direction;
+}

@@ -91,6 +91,10 @@ static ShadeableIntersection* dev_intersections = NULL;
 // All mesh triangles in the scene (meshes point into this by triStart/triCount)
 static Triangle* dev_triangles = NULL;
 
+// Indices of the emissive geoms (cubes/spheres), used for direct lighting
+static int* dev_lightIndices = NULL;
+static int numLights = 0;
+
 // Timers for measuring how long one iteration takes
 static cudaEvent_t timerStart = NULL;
 static cudaEvent_t timerStop = NULL;
@@ -129,6 +133,24 @@ void pathtraceInit(Scene* scene)
         cudaMemcpy(dev_triangles, scene->triangles.data(), scene->triangles.size() * sizeof(Triangle), cudaMemcpyHostToDevice);
     }
 
+    // Find the lights. Mesh lights are skipped (we only know how to sample cubes/spheres).
+    std::vector<int> lightIndices;
+    for (int i = 0; i < (int)scene->geoms.size(); ++i)
+    {
+        const Geom& g = scene->geoms[i];
+        if (g.type != MESH && scene->materials[g.materialid].emittance > 0.0f)
+        {
+            lightIndices.push_back(i);
+        }
+    }
+    numLights = (int)lightIndices.size();
+    dev_lightIndices = NULL;
+    if (numLights > 0)
+    {
+        cudaMalloc(&dev_lightIndices, numLights * sizeof(int));
+        cudaMemcpy(dev_lightIndices, lightIndices.data(), numLights * sizeof(int), cudaMemcpyHostToDevice);
+    }
+
     cudaEventCreate(&timerStart);
     cudaEventCreate(&timerStop);
 
@@ -145,6 +167,8 @@ void pathtraceFree()
     // TODO: clean up any extra device memory you created
     cudaFree(dev_triangles);
     dev_triangles = NULL;
+    cudaFree(dev_lightIndices);
+    dev_lightIndices = NULL;
 
     if (timerStart != NULL)
     {
@@ -371,7 +395,11 @@ __global__ void shadeMaterial(
     ShadeableIntersection* shadeableIntersections,
     PathSegment* pathSegments,
     Material* materials,
-    bool russianRoulette)
+    bool russianRoulette,
+    bool directLighting,
+    Geom* geoms,
+    int* lightIndices,
+    int numLights)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_paths)
@@ -418,7 +446,19 @@ __global__ void shadeMaterial(
                 // compaction shuffle the paths around in the array
                 thrust::default_random_engine rng = makeSeededRandomEngine(iter, path.pixelIndex, path.remainingBounces);
                 glm::vec3 intersect = path.ray.origin + intersection.t * path.ray.direction;
-                scatterRay(path, intersect, intersection.surfaceNormal, intersection.outside, material, rng);
+
+                // Direct lighting: if the next ray is the last one and we're on a
+                // diffuse surface, aim it at a light instead of bouncing randomly
+                bool isDiffuse = (material.hasReflective == 0.0f) && (material.hasRefractive == 0.0f);
+                bool lastRay = (path.remainingBounces == 1);
+                if (directLighting && isDiffuse && lastRay && numLights > 0)
+                {
+                    sampleDirectLight(path, intersect, intersection.surfaceNormal, material, geoms, lightIndices, numLights, rng);
+                }
+                else
+                {
+                    scatterRay(path, intersect, intersection.surfaceNormal, intersection.outside, material, rng);
+                }
 
                 // Russian roulette: randomly kill dim paths, boost survivors
                 // by 1 / p so the result stays unbiased
@@ -530,6 +570,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     bool antiAliasing = true;
     bool russianRoulette = true;
     bool bboxCulling = true;
+    bool directLighting = true;
     if (guiData != NULL)
     {
         streamCompaction = guiData->StreamCompaction;
@@ -537,6 +578,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         antiAliasing = guiData->AntiAliasing;
         russianRoulette = guiData->RussianRoulette;
         bboxCulling = guiData->BBoxCulling;
+        directLighting = guiData->DirectLighting;
     }
 
     // Time the whole iteration, from camera rays to final gather
@@ -597,7 +639,11 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_intersections,
             dev_paths,
             dev_materials,
-            russianRoulette
+            russianRoulette,
+            directLighting,
+            dev_geoms,
+            dev_lightIndices,
+            numLights
         );
         checkCUDAError("shade one bounce");
 

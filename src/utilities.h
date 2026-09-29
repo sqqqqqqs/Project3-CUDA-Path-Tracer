@@ -29,6 +29,7 @@ public:
     bool AntiAliasing = true;
     bool RussianRoulette = true;
     bool BBoxCulling = true;
+    bool DirectLighting = true;
 
     // Stats shown in the ImGui panel
     float AvgIterationMs = 0.0f;            // average time per iteration since the last restart
