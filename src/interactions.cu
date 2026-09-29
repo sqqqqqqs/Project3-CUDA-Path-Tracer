@@ -106,6 +106,31 @@ __host__ __device__ void scatterRay(
     {
         // Mirror: bounce straight off the surface, tinted by the specular color
         newDirection = glm::reflect(pathSegment.ray.direction, normal);
+
+        // Rough metal: wiggle the mirror direction inside a Phong lobe
+        // (GPU Gems 3 ch. 20, eq. 7-9). Bigger exponent = tighter lobe = shinier.
+        if (m.specular.exponent > 0.0f)
+        {
+            thrust::uniform_real_distribution<float> u01(0, 1);
+            float cosTheta = powf(u01(rng), 1.0f / (m.specular.exponent + 1.0f));
+            float sinTheta = sqrtf(glm::max(0.0f, 1.0f - cosTheta * cosTheta));
+            float phi = TWO_PI * u01(rng);
+
+            // Two directions perpendicular to the mirror direction, to aim around it
+            glm::vec3 mirror = newDirection;
+            glm::vec3 helper = (fabsf(mirror.x) < 0.9f) ? glm::vec3(1.0f, 0.0f, 0.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
+            glm::vec3 side1 = glm::normalize(glm::cross(mirror, helper));
+            glm::vec3 side2 = glm::cross(mirror, side1);
+            newDirection = cosTheta * mirror + sinTheta * (cosf(phi) * side1 + sinf(phi) * side2);
+
+            // Wiggled below the surface: nothing reflects that way, path done
+            if (glm::dot(newDirection, normal) <= 0.0f)
+            {
+                pathSegment.color = glm::vec3(0.0f);
+                pathSegment.remainingBounces = 0;
+                return;
+            }
+        }
         pathSegment.color *= m.specular.color;
     }
     else

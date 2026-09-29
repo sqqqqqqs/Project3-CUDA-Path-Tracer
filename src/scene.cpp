@@ -126,6 +126,17 @@ void Scene::loadFromJSON(const std::string& jsonName)
             newMaterial.color = glm::vec3(col[0], col[1], col[2]);
             newMaterial.specular.color = newMaterial.color;
             newMaterial.hasReflective = 1.0f;
+
+            // Rough metal: ROUGHNESS 0 = perfect mirror. Turn roughness into a Phong
+            // exponent (common mapping n = 2 / r^2 - 2): rougher = blurrier reflection
+            if (p.contains("ROUGHNESS"))
+            {
+                float roughness = p["ROUGHNESS"];
+                if (roughness > 0.0f)
+                {
+                    newMaterial.specular.exponent = glm::max(2.0f / (roughness * roughness) - 2.0f, 0.01f);
+                }
+            }
         }
         else if (p["TYPE"] == "Refractive")
         {
