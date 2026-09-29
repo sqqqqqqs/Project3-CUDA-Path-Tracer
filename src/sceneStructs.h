@@ -39,6 +39,7 @@ struct Geom
     glm::mat4 transform;
     glm::mat4 inverseTransform;
     glm::mat4 invTranspose;
+    glm::vec3 velocity;     // how far it moves while the shutter is open (motion blur)
 
     // Mesh only: which triangles belong to it, and its world-space bounding box
     int triStart;
@@ -90,6 +91,7 @@ struct PathSegment
     glm::vec3 color;
     int pixelIndex;
     int remainingBounces;
+    float time;     // when during the shutter this path happens, 0 to 1 (motion blur)
 };
 
 // Use with a corresponding PathSegment to do:

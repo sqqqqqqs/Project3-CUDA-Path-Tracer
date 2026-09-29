@@ -192,7 +192,7 @@ void pathtraceFree()
 * motion blur - jitter rays "in time"
 * lens effect - jitter ray origin positions based on a lens
 */
-__global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, bool antiAliasing, PathSegment* pathSegments)
+__global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, bool antiAliasing, bool motionBlur, PathSegment* pathSegments)
 {
     int x = (blockIdx.x * blockDim.x) + threadIdx.x;
     int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -239,6 +239,13 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, bool
 
             segment.ray.origin = cam.position + lensOffset;
             segment.ray.direction = glm::normalize(focusPoint - segment.ray.origin);
+        }
+
+        // Motion blur: each path happens at a random moment while the shutter is open
+        segment.time = 0.0f;
+        if (motionBlur)
+        {
+            segment.time = u01(rng);
         }
 
         segment.pixelIndex = index;
@@ -288,17 +295,22 @@ __global__ void computeIntersections(
         {
             Geom& geom = geoms[i];
 
+            // Motion blur: moving the object forward = moving the ray backward.
+            // Only the origin shifts, so t still measures along the original ray.
+            Ray ray = pathSegment.ray;
+            ray.origin -= geom.velocity * pathSegment.time;
+
             if (geom.type == CUBE)
             {
-                t = boxIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
+                t = boxIntersectionTest(geom, ray, tmp_intersect, tmp_normal, outside);
             }
             else if (geom.type == SPHERE)
             {
-                t = sphereIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
+                t = sphereIntersectionTest(geom, ray, tmp_intersect, tmp_normal, outside);
             }
             else if (geom.type == MESH)
             {
-                t = meshIntersectionTest(geom, triangles, pathSegment.ray, tmp_intersect, tmp_normal, outside, bboxCulling);
+                t = meshIntersectionTest(geom, triangles, ray, tmp_intersect, tmp_normal, outside, bboxCulling);
             }
             // TODO: add more intersection tests here... triangle? metaball? CSG?
 
@@ -574,7 +586,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     // Time the whole iteration, from camera rays to final gather
     cudaEventRecord(timerStart);
 
-    generateRayFromCamera<<<blocksPerGrid2d, blockSize2d>>>(cam, iter, traceDepth, settings.AntiAliasing, dev_paths);
+    generateRayFromCamera<<<blocksPerGrid2d, blockSize2d>>>(cam, iter, traceDepth, settings.AntiAliasing, settings.MotionBlur, dev_paths);
     checkCUDAError("generate camera ray");
 
     int depth = 0;

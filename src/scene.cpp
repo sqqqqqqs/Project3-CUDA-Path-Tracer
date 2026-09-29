@@ -174,6 +174,14 @@ void Scene::loadFromJSON(const std::string& jsonName)
         newGeom.inverseTransform = glm::inverse(newGeom.transform);
         newGeom.invTranspose = glm::inverseTranspose(newGeom.transform);
 
+        // Motion blur: optional movement during the shutter, no VELOCITY = standing still
+        newGeom.velocity = glm::vec3(0.0f);
+        if (p.contains("VELOCITY"))
+        {
+            const auto& vel = p["VELOCITY"];
+            newGeom.velocity = glm::vec3(vel[0], vel[1], vel[2]);
+        }
+
         if (newGeom.type == MESH)
         {
             // Smooth shading by default; set "SMOOTH": false for a faceted look

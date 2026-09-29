@@ -314,6 +314,10 @@ void RenderImGui()
     {
         camchanged = true;
     }
+    if (ImGui::Checkbox("Motion blur", &imguiData->MotionBlur))
+    {
+        camchanged = true;
+    }
 
     // Depth of field: lens radius 0 means a pinhole camera (everything sharp)
     ImGui::Separator();

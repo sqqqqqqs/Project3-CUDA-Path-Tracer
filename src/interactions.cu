@@ -196,6 +196,7 @@ __host__ __device__ void sampleDirectLight(
     glm::vec3 lightNormal;
     float lightArea;
     sampleLightSurface(light, rng, lightPoint, lightNormal, lightArea);
+    lightPoint += light.velocity * pathSegment.time;   // where a moving light is at this moment
 
     glm::vec3 toLight = lightPoint - intersect;
     float distSquared = glm::dot(toLight, toLight);
